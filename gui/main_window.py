@@ -40,14 +40,14 @@ def run_app():
     # ---------------- HEADER ----------------
     title = ctk.CTkLabel(
         content_frame,
-        text="Study Lens",
-        font=ctk.CTkFont(size=30, weight="bold")
+        text="StudyLens",
+        font=ctk.CTkFont(size=30, weight="bold",family = "System UI")
     )
     title.grid(row=0, column=0, pady=(0, 5), sticky="n")
 
     subtitle = ctk.CTkLabel(
         content_frame,
-        text="analyze your study hours relative to the grade you're getting",
+        text="A Simple Data Analysis Tool",
         font=ctk.CTkFont(size=14),
         text_color=("gray60", "gray70")
     )
@@ -94,7 +94,7 @@ def run_app():
     # ---------------- FOOTER ----------------
     footer = ctk.CTkLabel(
         app,
-        text="Created for CS-117 — Study Hours vs Performance",
+        text="Created by AE-B — Study Hours vs Performance",
         font=ctk.CTkFont(size=11),
         text_color=("gray55", "gray65")
     )
