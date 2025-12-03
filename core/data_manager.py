@@ -1,25 +1,19 @@
-"""data_manager.py
+"""
+data_manager.py
 
-Highly-advanced Pandas-based data management module for the
-"Study Hours vs Performance" project (production-style).
+Flexible DataManager for a single student's academic performance.
+Each record:
+- subject (one of ALLOWED_SUBJECTS)
+- assessment_type (Quiz, Assignment, Midterm, Final)
+- hours (float >= 0)
+- marks (float, 0 <= marks <= total_marks)
+- total_marks (float > 0)
 
-What it provides (high level):
-- A `DataManager` class that encapsulates a pandas DataFrame and offers
-  robust, well-documented methods for loading, saving, validating and
-  manipulating records.
-- Defensive programming: validation, type conversion, clear exceptions,
-  atomic saves (write-to-temp + rename), and optional automatic backups.
-- Utilities: search, update, delete, deduplicate, summary export.
-- Safe CSV/Excel IO and integration-friendly API signatures for other modules.
-
-Dependencies: pandas, numpy
-Install: pip install pandas numpy
-
-Author: Generated for student Pandas-module (advanced, production-style)
+Statistics use percentage = marks / total_marks * 100 and compute correlations
+between hours and percentage.
 """
 
 from __future__ import annotations
-
 import os
 import tempfile
 import shutil
@@ -30,13 +24,26 @@ from typing import Optional, List, Dict, Any, Union
 import pandas as pd
 import numpy as np
 
-# --------------------------- Configuration ---------------------------
+# --------------------------
+# Configuration
+# --------------------------
 
-DEFAULT_COLUMNS = ["Name", "Study Hours", "Marks"]
+ALLOWED_SUBJECTS = [
+    "Calculus and Analytic Geometry",
+    "Functional English",
+    "Applications of ICT",
+    "Applied Physics",
+    "Introduction to Aerospace Engineering",
+    "Islamic Studies",
+]
+
+ALLOWED_ASSESSMENTS = ["Quiz", "Assignment", "Midterm", "Final"]
+
+DEFAULT_COLUMNS = ["subject", "assessment_type", "hours", "marks", "total_marks"]
 DEFAULT_CSV = os.path.join("data", "study_data.csv")
 BACKUP_DIR = os.path.join("data", "backups")
 
-# Configure module-level logger
+# Logger
 logger = logging.getLogger("data_manager")
 logger.setLevel(logging.DEBUG)
 if not logger.handlers:
@@ -47,177 +54,150 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 
-# --------------------------- Exceptions ---------------------------
+# --------------------------
+# Exceptions
+# --------------------------
 
 class DataManagerError(Exception):
-    """Base exception for DataManager-related errors."""
+    pass
 
 
 class ValidationError(DataManagerError):
-    """Raised when record validation fails."""
+    pass
 
 
-# --------------------------- Dataclass Record ---------------------------
+# --------------------------
+# Dataclass
+# --------------------------
 
 @dataclass
 class StudyRecord:
-    """Structured type for a single study record."""
-
-    Name: str
-    Study_Hours: float
-    Marks: float
+    subject: str
+    assessment_type: str
+    hours: float
+    marks: float
+    total_marks: float
 
     def to_row(self) -> Dict[str, Any]:
-        """Convert to a dict shaped to DataFrame columns."""
-        return {"Name": self.Name, "Study Hours": self.Study_Hours, "Marks": self.Marks}
+        return asdict(self)
 
 
-# --------------------------- Helper utilities ---------------------------
+# --------------------------
+# Helpers
+# --------------------------
 
-def ensure_data_folder_exists(path: str = "data") -> None:
-    os.makedirs(path, exist_ok=True)
+def ensure_data_folders():
+    os.makedirs("data", exist_ok=True)
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
 
-def atomic_write_df(df: pd.DataFrame, target_path: str, **to_csv_kwargs) -> None:
-    """Write DataFrame atomically: write to temp then rename.
-
-    This reduces chance of a corrupted CSV if the program is interrupted.
-    """
-    ensure_data_folder_exists(os.path.dirname(target_path) or "data")
-    dirpath = os.path.dirname(target_path) or "."
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-study-data-", dir=dirpath)
+def atomic_write_df(df: pd.DataFrame, path: str):
+    ensure_data_folders()
+    dirpath = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmpdm-", dir=dirpath)
     os.close(fd)
     try:
-        df.to_csv(tmp_path, index=False, **to_csv_kwargs)
-        # On POSIX systems, os.replace is atomic.
-        os.replace(tmp_path, target_path)
+        df.to_csv(tmp, index=False)
+        os.replace(tmp, path)
     finally:
-        if os.path.exists(tmp_path):
+        if os.path.exists(tmp):
             try:
-                os.remove(tmp_path)
+                os.remove(tmp)
             except Exception:
-                logger.debug("Could not remove temporary file %s", tmp_path)
+                pass
 
 
-# --------------------------- DataManager Class ---------------------------
+# --------------------------
+# DataManager
+# --------------------------
 
 class DataManager:
-    """Encapsulate the study dataset with safe IO and manipulation helpers.
-
-    Example usage:
-        dm = DataManager()
-        dm.load()  # loads DEFAULT_CSV or starts empty
-        dm.add_record(name, hours, marks)
-        dm.save()
-
-    Public methods are documented with docstrings and type hints to make
-    integration straightforward for other team members.
-    """
-
-    def __init__(self, csv_path: str = DEFAULT_CSV, columns: Optional[List[str]] = None, autosave: bool = False):
+    def __init__(self, csv_path: str = DEFAULT_CSV, autosave: bool = False):
         self.csv_path = csv_path
-        self.columns = columns or DEFAULT_COLUMNS.copy()
-        self.autosave = bool(autosave)
-        self._df = pd.DataFrame(columns=self.columns)
-        ensure_data_folder_exists(os.path.dirname(self.csv_path) or "data")
-        logger.info("DataManager initialized (csv_path=%s, autosave=%s)", self.csv_path, self.autosave)
+        self.autosave = autosave
+        self._df = pd.DataFrame(columns=DEFAULT_COLUMNS)
+        ensure_data_folders()
+        logger.info("DataManager initialized (csv=%s, autosave=%s)", self.csv_path, self.autosave)
 
-    # --------------------- Loading / Saving ---------------------
+    # ---- Load / Save ----
 
     def load(self) -> pd.DataFrame:
-        """Load dataset from CSV into memory. If file not found, keep empty DataFrame.
-
-        Returns:
-            The in-memory DataFrame reference.
-        """
         if os.path.exists(self.csv_path):
             try:
                 df = pd.read_csv(self.csv_path)
-                # Normalize columns if necessary
-                missing = [c for c in self.columns if c not in df.columns]
-                for c in missing:
-                    df[c] = np.nan
-                df = df[self.columns]
-                self._df = df
-                logger.info("Loaded %d records from %s", len(self._df), self.csv_path)
+                for c in DEFAULT_COLUMNS:
+                    if c not in df.columns:
+                        df[c] = np.nan
+                self._df = df[DEFAULT_COLUMNS].copy().reset_index(drop=True)
+                logger.info("Loaded %d rows from %s", len(self._df), self.csv_path)
             except Exception as e:
-                logger.exception("Failed to load CSV file: %s", e)
-                raise DataManagerError("Failed to read CSV: " + str(e))
+                logger.exception("Failed to load CSV: %s", e)
+                raise DataManagerError("Failed to load CSV: " + str(e))
         else:
-            logger.info("CSV not found at %s — starting with empty dataset.", self.csv_path)
-            self._df = pd.DataFrame(columns=self.columns)
+            logger.info("CSV not found — starting empty dataset.")
+            self._df = pd.DataFrame(columns=DEFAULT_COLUMNS)
         return self._df
 
-    def save(self, make_backup: bool = True) -> None:
-        """Save in-memory DataFrame to CSV using atomic write.
-
-        Args:
-            make_backup: If True, create a dated backup of existing CSV before overwrite.
-        """
-        # Backup existing file
-        if make_backup and os.path.exists(self.csv_path):
-            backup_name = f"study_data_backup_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            backup_path = os.path.join(BACKUP_DIR, backup_name)
-            try:
-                shutil.copy2(self.csv_path, backup_path)
-                logger.info("Backup created: %s", backup_path)
-            except Exception as e:
-                logger.warning("Could not create backup: %s", e)
-
+    def save(self) -> None:
         try:
+            if os.path.exists(self.csv_path):
+                backup_name = f"backup_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                try:
+                    shutil.copy2(self.csv_path, os.path.join(BACKUP_DIR, backup_name))
+                    logger.info("Backup created: %s", backup_name)
+                except Exception:
+                    logger.warning("Backup creation failed; continuing save.")
             atomic_write_df(self._df, self.csv_path)
-            logger.info("Saved %d records to %s", len(self._df), self.csv_path)
+            logger.info("Saved %d rows to %s", len(self._df), self.csv_path)
         except Exception as e:
-            logger.exception("Failed to save data: %s", e)
-            raise DataManagerError("Failed to save data: " + str(e))
+            logger.exception("Save failed: %s", e)
+            raise DataManagerError("Save failed: " + str(e))
 
-    # --------------------- Record validation ---------------------
+    # ---- Validation ----
 
-    def _validate_and_normalize_record(self, name: str, hours: Union[int, float, str], marks: Union[int, float, str]) -> StudyRecord:
-        """Validate inputs and return a normalized StudyRecord.
+    def _validate(self, subject: str, assessment_type: str, hours: Union[int, float, str],
+                  marks: Union[int, float, str], total_marks: Union[int, float, str]) -> StudyRecord:
 
-        Rules:
-            - Name: non-empty string (trimmed)
-            - Study Hours: numeric >= 0
-            - Marks: numeric 0..100 (you can change range if needed)
+        # Subject
+        if subject not in ALLOWED_SUBJECTS:
+            raise ValidationError(f"Invalid subject: {subject}")
 
-        Raises:
-            ValidationError on invalid input.
-        """
-        # Name
-        if not isinstance(name, str):
-            raise ValidationError("Name must be a string")
-        name_clean = name.strip()
-        if name_clean == "":
-            raise ValidationError("Name must not be empty")
+        # Assessment
+        if assessment_type not in ALLOWED_ASSESSMENTS:
+            raise ValidationError(f"Invalid assessment_type: {assessment_type}")
 
         # Hours
         try:
-            hours_val = float(hours)
+            hours_v = float(hours)
         except Exception:
-            raise ValidationError("Study Hours must be numeric")
-        if hours_val < 0:
-            raise ValidationError("Study Hours must be >= 0")
+            raise ValidationError("Hours must be numeric.")
+        if hours_v < 0:
+            raise ValidationError("Hours must be >= 0")
 
-        # Marks
+        # Total marks
         try:
-            marks_val = float(marks)
+            total_v = float(total_marks)
         except Exception:
-            raise ValidationError("Marks must be numeric")
-        if not (0 <= marks_val <= 100):
-            raise ValidationError("Marks must be between 0 and 100")
+            raise ValidationError("Total marks must be numeric.")
+        if total_v <= 0:
+            raise ValidationError("Total marks must be > 0")
 
-        return StudyRecord(Name=name_clean, Study_Hours=hours_val, Marks=marks_val)
+        # Marks obtained
+        try:
+            marks_v = float(marks)
+        except Exception:
+            raise ValidationError("Marks must be numeric.")
+        if not (0 <= marks_v <= total_v):
+            raise ValidationError("Marks must be between 0 and total_marks.")
 
-    # --------------------- CRUD Operations ---------------------
+        return StudyRecord(subject=subject, assessment_type=assessment_type,
+                           hours=hours_v, marks=marks_v, total_marks=total_v)
 
-    def add_record(self, name: str, hours: Union[int, float, str], marks: Union[int, float, str]) -> pd.DataFrame:
-        """Add a validated record to the DataFrame and optionally autosave.
+    # ---- CRUD ----
 
-        Returns the updated DataFrame.
-        """
-        rec = self._validate_and_normalize_record(name, hours, marks)
+    def add_record(self, subject: str, assessment_type: str, hours: Union[int, float, str],
+                   marks: Union[int, float, str], total_marks: Union[int, float, str]) -> pd.DataFrame:
+        rec = self._validate(subject, assessment_type, hours, marks, total_marks)
         self._df = pd.concat([self._df, pd.DataFrame([rec.to_row()])], ignore_index=True)
         logger.info("Added record: %s", rec)
         if self.autosave:
@@ -225,39 +205,19 @@ class DataManager:
         return self._df
 
     def update_record(self, index: int, **fields) -> pd.DataFrame:
-        """Update an existing row by integer index. Valid fields: Name, Study Hours, Marks.
-
-        Example:
-            dm.update_record(3, Name='Ali', Marks=85)
-
-        Raises IndexError if index invalid, ValidationError for bad values.
-        """
         if index < 0 or index >= len(self._df):
             raise IndexError("Index out of range")
-
-        # Work on a copy of the row to validate
-        row = self._df.loc[index].to_dict()
-        new_row = row.copy()
-        for k, v in fields.items():
-            if k not in self.columns:
-                raise ValidationError(f"Unknown field: {k}")
-            new_row[k] = v
-
-        # Validate using normalize function
-        rec = self._validate_and_normalize_record(new_row["Name"], new_row["Study Hours"], new_row["Marks"])
-        # Apply
-        for col, val in rec.to_row().items():
-            self._df.at[index, col] = val
-        logger.info("Updated index %d -> %s", index, rec)
+        current = self._df.loc[index].to_dict()
+        merged = {**current, **fields}
+        rec = self._validate(merged["subject"], merged["assessment_type"],
+                             merged["hours"], merged["marks"], merged["total_marks"])
+        self._df.loc[index] = rec.to_row()
+        logger.info("Updated record %d -> %s", index, rec)
         if self.autosave:
             self.save()
         return self._df
 
     def delete_record(self, index: int) -> pd.DataFrame:
-        """Delete a row by index and reindex the DataFrame.
-
-        Raises IndexError if index out of range.
-        """
         if index < 0 or index >= len(self._df):
             raise IndexError("Index out of range")
         self._df = self._df.drop(index).reset_index(drop=True)
@@ -266,171 +226,144 @@ class DataManager:
             self.save()
         return self._df
 
-    # --------------------- Search / Filter ---------------------
+    # ---- Search / Filter ----
 
-    def search(self, name_substr: Optional[str] = None, min_hours: Optional[float] = None, max_hours: Optional[float] = None, min_marks: Optional[float] = None, max_marks: Optional[float] = None) -> pd.DataFrame:
-        """Return a filtered DataFrame according to the provided criteria.
-
-        All filters are optional; pass None to skip a filter.
-        The name search is case-insensitive and searches for substring.
-        """
-        df = self._df
-        if name_substr is not None:
-            mask = df["Name"].fillna("").str.contains(str(name_substr), case=False, na=False)
-            df = df[mask]
-        if min_hours is not None:
-            df = df[df["Study Hours"] >= float(min_hours)]
-        if max_hours is not None:
-            df = df[df["Study Hours"] <= float(max_hours)]
-        if min_marks is not None:
-            df = df[df["Marks"] >= float(min_marks)]
-        if max_marks is not None:
-            df = df[df["Marks"] <= float(max_marks)]
+    def search(self, subject: Optional[str] = None, assessment_type: Optional[str] = None) -> pd.DataFrame:
+        df = self._df.copy()
+        if subject:
+            df = df[df["subject"] == subject]
+        if assessment_type:
+            df = df[df["assessment_type"] == assessment_type]
         return df.reset_index(drop=True)
 
-    # --------------------- Deduplication & Cleaning ---------------------
+    # ---- Statistics ----
 
-    def deduplicate(self, subset: Optional[List[str]] = None, keep: str = "first") -> pd.DataFrame:
-        """Remove duplicate rows. By default, duplicates are checked on all columns.
-
-        Args:
-            subset: column list to consider for duplicates (e.g. ['Name']).
-            keep: which duplicate to keep: 'first'|'last'|False -> raises error for ambiguous
-        """
-        before = len(self._df)
-        self._df = self._df.drop_duplicates(subset=subset, keep=keep).reset_index(drop=True)
-        after = len(self._df)
-        logger.info("Deduplicated dataset: %d -> %d records", before, after)
-        if self.autosave:
-            self.save()
-        return self._df
-
-    def clean_whitespace(self) -> pd.DataFrame:
-        """Trim whitespace in string columns (useful for 'Name')."""
-        if "Name" in self._df.columns:
-            self._df["Name"] = self._df["Name"].astype(str).str.strip()
-        return self._df
-
-    # --------------------- Summaries / Exports ---------------------
+    def _percentage_series(self, df: pd.DataFrame) -> pd.Series:
+        # compute percentage (marks/total_marks * 100), handle divide-by-zero safely
+        pct = pd.to_numeric(df["marks"], errors="coerce") / pd.to_numeric(df["total_marks"], errors="coerce") * 100.0
+        return pct
 
     def summary_statistics(self) -> Dict[str, Any]:
-        """Return basic summary stats that NumPy module can also compute.
-
-        Returns a dictionary with keys: n, mean_hours, mean_marks, max_hours, min_hours, correlation_hours_marks
-        """
-        df = self._df.copy()
+        df = self._df
         if df.empty:
-            return {
-                "n": 0,
-                "mean_hours": None,
-                "mean_marks": None,
-                "max_hours": None,
-                "min_hours": None,
-                "correlation": None,
-            }
-        n = len(df)
-        mean_hours = float(df["Study Hours"].mean())
-        mean_marks = float(df["Marks"].mean())
-        max_hours = float(df["Study Hours"].max())
-        min_hours = float(df["Study Hours"].min())
-        # correlation (pearson) — handle constant series
-        try:
-            corr = float(df["Study Hours"].corr(df["Marks"]))
-        except Exception:
-            corr = None
-        return {
-            "n": n,
-            "mean_hours": mean_hours,
-            "mean_marks": mean_marks,
-            "max_hours": max_hours,
-            "min_hours": min_hours,
-            "correlation": corr,
-        }
+            return {"n": 0}
 
-    def export_excel(self, excel_path: str) -> None:
-        """Export the current DataFrame to an Excel file (xlsx)."""
+        stats: Dict[str, Any] = {"n": len(df)}
+
+        # Overall averages (hours, percentage)
+        stats["overall_avg_hours"] = float(df["hours"].mean())
+        stats["overall_avg_percentage"] = float(self._percentage_series(df).mean())
+
+        # Subject-wise
+        for subj in ALLOWED_SUBJECTS:
+            subdf = df[df["subject"] == subj]
+            if subdf.empty:
+                continue
+            pct = self._percentage_series(subdf)
+            stats[f"{subj}_avg_hours"] = float(subdf["hours"].mean())
+            stats[f"{subj}_avg_percentage"] = float(pct.mean())
+            try:
+                corr = None
+                if pct.dropna().nunique() > 1 and subdf["hours"].dropna().nunique() > 1:
+                    corr = float(subdf["hours"].astype(float).corr(pct))
+                stats[f"{subj}_correlation"] = corr
+            except Exception:
+                stats[f"{subj}_correlation"] = None
+
+        # Assessment-type wise
+        for at in ALLOWED_ASSESSMENTS:
+            subdf = df[df["assessment_type"] == at]
+            if subdf.empty:
+                continue
+            pct = self._percentage_series(subdf)
+            stats[f"{at}_avg_hours"] = float(subdf["hours"].mean())
+            stats[f"{at}_avg_percentage"] = float(pct.mean())
+            try:
+                corr = None
+                if pct.dropna().nunique() > 1 and subdf["hours"].dropna().nunique() > 1:
+                    corr = float(subdf["hours"].astype(float).corr(pct))
+                stats[f"{at}_correlation"] = corr
+            except Exception:
+                stats[f"{at}_correlation"] = None
+
+        return stats
+
+    # ---- Generate human summary ----
+
+    def generate_summary(self) -> str:
+        stats = self.summary_statistics()
+        if stats.get("n", 0) == 0:
+            return "No data available."
+
+        lines: List[str] = []
+        lines.append("STUDY PERFORMANCE SUMMARY\n")
+        lines.append(f"Total Records: {stats['n']}\n\n")
+        lines.append(f"Overall Avg Hours: {stats['overall_avg_hours']:.2f}\n")
+        lines.append(f"Overall Avg Percentage: {stats['overall_avg_percentage']:.2f}%\n\n")
+
+        lines.append("=== SUBJECTS ===\n")
+        # strongest correlation tracking (subject)
+        strongest_subj = (None, 0.0)
+        for subj in ALLOWED_SUBJECTS:
+            key_avg_pct = f"{subj}_avg_percentage"
+            key_corr = f"{subj}_correlation"
+            if key_avg_pct in stats:
+                avg_pct = stats.get(key_avg_pct)
+                corr = stats.get(key_corr)
+                lines.append(f"{subj}\n  Avg Percentage: {avg_pct:.2f}%\n  Correlation (hours vs %): {corr if corr is not None else 'N/A'}\n\n")
+                if corr is not None and (strongest_subj[0] is None or abs(corr) > abs(strongest_subj[1])):
+                    strongest_subj = (subj, corr)
+
+        lines.append("=== ASSESSMENTS ===\n")
+        strongest_ass = (None, 0.0)
+        for at in ALLOWED_ASSESSMENTS:
+            key_avg = f"{at}_avg_percentage"
+            key_corr = f"{at}_correlation"
+            if key_avg in stats:
+                avg_pct = stats.get(key_avg)
+                corr = stats.get(key_corr)
+                lines.append(f"{at}\n  Avg Percentage: {avg_pct:.2f}%\n  Correlation (hours vs %): {corr if corr is not None else 'N/A'}\n\n")
+                if corr is not None and (strongest_ass[0] is None or abs(corr) > abs(strongest_ass[1])):
+                    strongest_ass = (at, corr)
+
+        lines.append("\n")
+        if strongest_subj[0] is None:
+            lines.append("No sufficient variability to identify strongest subject correlation.\n")
+        else:
+            lines.append(f"Strongest subject correlation: {strongest_subj[0]} (corr = {strongest_subj[1]:.3f})\n")
+        if strongest_ass[0] is None:
+            lines.append("No sufficient variability to identify strongest assessment correlation.\n")
+        else:
+            lines.append(f"Strongest assessment correlation: {strongest_ass[0]} (corr = {strongest_ass[1]:.3f})\n")
+
+        return "".join(lines)
+
+    # ---- Exports / Utilities ----
+
+    def export_excel(self, path: str) -> None:
         try:
-            ensure_data_folder_exists(os.path.dirname(excel_path) or "data")
-            self._df.to_excel(excel_path, index=False)
-            logger.info("Exported dataset to %s", excel_path)
+            ensure_data_folders()
+            self._df.to_excel(path, index=False)
+            logger.info("Exported to %s", path)
         except Exception as e:
-            logger.exception("Failed exporting excel: %s", e)
-            raise DataManagerError("Failed exporting excel: " + str(e))
-
-    # --------------------- Utility / Integration ---------------------
+            logger.exception("Export failed: %s", e)
+            raise DataManagerError("Export failed: " + str(e))
 
     def get_dataframe(self) -> pd.DataFrame:
-        """Return the internal DataFrame (a shallow copy to avoid accidental modification)."""
         return self._df.copy()
 
     def replace_dataframe(self, df: pd.DataFrame) -> None:
-        """Replace internal DataFrame (ensure it has required columns)."""
-        for c in self.columns:
+        for c in DEFAULT_COLUMNS:
             if c not in df.columns:
                 df[c] = np.nan
-        self._df = df[self.columns].copy().reset_index(drop=True)
-        logger.info("Internal DataFrame replaced (len=%d)", len(self._df))
+        self._df = df[DEFAULT_COLUMNS].copy().reset_index(drop=True)
         if self.autosave:
             self.save()
 
     def backup(self, dst_folder: Optional[str] = None) -> str:
-        """Create a timestamped CSV backup of current in-memory DataFrame and return path."""
         dst_folder = dst_folder or BACKUP_DIR
-        ensure_data_folder_exists(dst_folder)
-        backup_name = f"inmemory_backup_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        ensure_data_folders()
+        backup_name = f"inmem_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
         path = os.path.join(dst_folder, backup_name)
-        try:
-            atomic_write_df(self._df, path)
-            logger.info("Created in-memory backup: %s", path)
-            return path
-        except Exception as e:
-            logger.exception("Backup failed: %s", e)
-            raise DataManagerError("Backup failed: " + str(e))
-
-    # Context manager support
-    def __enter__(self) -> "DataManager":
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        # On context exit, optionally save if autosave flagged.
-        if self.autosave:
-            try:
-                self.save()
-            except Exception:
-                logger.exception("Failed saving on context exit")
-
-
-# --------------------------- Example usage / self-test ---------------------------
-
-if __name__ == "__main__":
-    # Basic demo to show interfacing for other members. This block can be
-    # removed in production or left to help with manual testing.
-    dm = DataManager(autosave=False)
-    dm.load()
-
-    print("Current records:\n", dm.get_dataframe())
-
-    # Add a record
-    try:
-        dm.add_record("Ali Khan", 3.5, 78)
-        dm.add_record("Sana", "2", "88")  # string inputs accepted and converted
-    except ValidationError as e:
-        print("Validation error:", e)
-
-    print("After adds:\n", dm.get_dataframe())
-
-    # Update
-    try:
-        dm.update_record(0, Marks=80)
-    except Exception as e:
-        print("Update failed:", e)
-
-    print("Summary stats:", dm.summary_statistics())
-
-    # Save to default CSV
-    dm.save()
-
-    # Export to Excel
-    dm.export_excel(os.path.join("data", "study_data_export.xlsx"))
-
-    print("Demo finished.")
+        atomic_write_df(self._df, path)
+        return path
